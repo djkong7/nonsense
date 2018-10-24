@@ -1,0 +1,352 @@
+/**
+ * JavaCC file
+ */
+
+
+ 
+options {
+  JDK_VERSION = "1.8";
+}
+
+PARSER_BEGIN(NonsenseParser)
+import java.util.Map;
+import java.util.HashMap;
+
+public final class NonsenseParser {
+	//Maps the program variables to stack locations
+	private static Map<String,Integer> var_map = new HashMap<String,Integer>();
+	//Map holding the different registers that can be used and
+	//whether or not they are being used.
+	private static Map<String,Boolean> register_map = new HashMap<String,Boolean>();
+	//Initializer for the register map. No registers are being used at the beginning.
+	static {
+	  register_map.put("%ebx",false);
+	  register_map.put("%ecx",false);
+	  //register_map.put("%edx",false);
+	  register_map.put("%esi",false);
+	  register_map.put("%edi",false);
+	  };
+	//Keeps track of the number of exp start and end labels
+	//so that each one is unique
+	private static int exp_count = 0;
+	
+	public static void main(String args[]) { 
+	    NonsenseParser parser;
+	    java.io.InputStream input;
+		//System.out.println(args.length);
+	    if (args.length==1) { 
+	      try {
+	        //System.out.println(args[args.length-1]);
+	        input = new java.io.FileInputStream(args[args.length-1]);
+	      } catch (java.io.FileNotFoundException e) {
+	        System.out.println("File not found.");
+	        return;
+	      }
+	      
+	    } 
+	    else {
+	      System.out.println("Usage: nsc <inputfile>");
+	      return;
+	    }
+	    try {
+	      parser = new NonsenseParser(input);
+	      parser.program();
+	    } catch (ParseException e) {
+	      System.err.println("Syntax Error: "+e.getMessage());
+	    }
+	}
+	/**
+	*If the key isn't present, determines the offset value and adds the key.
+	*If the key is present, returns the stack offset value.
+	*@return the value of the key value pair
+	*/
+	public static int get_stack_offset(String key) {
+		int offset = var_map.getOrDefault(key,-1);
+		if(offset == -1) {
+		  	//all vars are int. therefore 4 bytes for x86
+		 	offset = (var_map.size()+1)*4;
+			var_map.put(key,offset);
+			//System.out.printf("put %s with value %d\n",key,offset);
+		}
+		return offset;
+	}
+
+	/**
+	*Gets a free register from the register map.
+	*@return a string that is the name of the free register
+	*/
+	public static String get_free_register() {
+		for(Map.Entry<String,Boolean> entry: register_map.entrySet()) { 
+			if(entry.getValue() == false) { 
+				register_map.replace(entry.getKey(),true);
+				return entry.getKey();
+			}
+		}
+		throw new ArrayIndexOutOfBoundsException("No free registers");
+	}
+
+	/**
+	*Frees a register being used by program
+	*@param the name of the register to be freed
+	*/
+	public static void free_register(String register) {
+		register_map.replace(register,false);
+	}
+
+	public static void inc_exp_count() {
+		exp_count++;
+	}
+	
+	public static int get_exp_count() {
+		return exp_count;
+	}
+	
+}
+
+PARSER_END(NonsenseParser)
+
+SKIP :
+{
+ 	" "
+|	"\r"
+|	"\t"
+|	"\n"
+} 
+
+TOKEN : /* keywords */
+{
+	<BEGIN: "begin">
+    | <END: "end">
+    | <OUTPUT: "output">
+}
+
+TOKEN : /* other lexical tokens */
+{
+ <EQ: "=">
+| <SEMICOLON: ";">
+| <LPAREN: "(">
+| <RPAREN: ")">
+| <PLUS: "+">
+| <MINUS: "-">
+| <TIMES: "*">
+| <DIVIDE: "/">
+| <EXP: "^">
+| <#DIGIT: ["0" - "9"] >
+| <#ALPHA: ["a" - "z"] | ["A" - "Z"] >
+| <VAR: <ALPHA> (<ALPHA> | <DIGIT>)*>
+| <INT: "0" | ["1" - "9"](<DIGIT>)* > //What does this line mean? Why not just <DIGIT>?
+}
+
+void program(): {}
+{
+   <BEGIN>
+   {
+     //System.out.print("Recognized BEGIN\n");
+     System.out.print(".intel_syntax\n"+
+						".section .rodata\n"+
+						".io_format:\n"+
+						".string \"%d\\12\\0\"\n"+
+						".text\n"+
+						".globl main;\n"+
+						".type main, @function\n"+
+						"main:\n"+
+						"push %ebp\n"+
+						"mov %ebp, %esp\n"+
+						"sub %esp, 64\n");
+		
+	
+   }
+   <SEMICOLON>
+   {
+     //System.out.print("Recognized SEIMICOLON\n");
+   }
+   
+   ( stmt() )*
+	
+	<END>
+	{
+	  System.out.print("leave\nret\n");
+	}
+	<SEMICOLON>
+    
+}
+
+void stmt() : {}
+{
+	(assignment() | output()) 
+	<SEMICOLON>
+}
+
+void assignment() :{Token t;
+					int stack_offset;
+					String returned_register;}
+{ 
+  t=<VAR>
+  	{
+  	  //System.out.println(t.image);
+  	  stack_offset=get_stack_offset(t.image);
+  	}
+  <EQ> returned_register=expr()
+  {
+    System.out.printf("mov dword ptr [%%ebp-%d], %s\n", stack_offset, returned_register);
+    free_register(returned_register);
+  }
+}
+
+void output() : {String returned_register;}
+{
+	<OUTPUT> <LPAREN> returned_register = expr() <RPAREN>
+	{
+	  System.out.printf("push %s\n"+
+						"push offset flat:.io_format\n"+
+						"call printf\n"+
+						"add %%esp, 8\n", returned_register);
+		free_register(returned_register);
+	}
+}
+
+String expr() : {int expr_value;
+				String returned_register;
+				String second_register;
+				String op;}
+{
+  (    returned_register=term()
+    (
+      LOOKAHEAD(2) op = addOp() second_register=term()
+		{
+			System.out.printf("%s %s, %s\n", op, returned_register, second_register);
+			free_register(second_register);
+		}
+    )*
+  )
+  {return returned_register;}
+} 
+
+String term() : {String returned_register;
+				String op;
+				String second_register;
+				int stack_offset;}
+{
+   (     returned_register=nterm()
+     (
+       LOOKAHEAD(2) op=mulOp() second_register=nterm()
+       {
+         //Division
+         if("idiv" == op) {
+           /*if("%cbx"==second_register) {
+				String temp_reg = get_free_register();
+				System.out.printf("mov %s, %s", temp_reg, returned_register);
+				free_register(returned_register);
+				returned_register = temp_reg;
+				free_register(temp_reg);
+           }*/
+           System.out.printf("mov %%eax, %s\n", returned_register);
+           //cdq changes %cdx, so save it on the stack first.
+           //stack_offset = get_stack_offset("temp");
+           //System.out.printf("mov dword ptr [%%ebp-%d], %%edx\n",stack_offset);
+		   System.out.print("cdq\n");
+		   System.out.printf("%s %s\n", op, second_register);
+		   System.out.printf("mov %s, %%eax\n", returned_register);
+		   //Return saved edx value
+		   //System.out.printf("mov %%edx, dword ptr [%%ebp-%d]\n", stack_offset);
+		   free_register(second_register);
+
+          /*mov %eax, dword ptr [%ebp-8]
+			mov %ebx, dword ptr [%ebp-4]
+			cdq
+			idiv %ebx
+			mov dword ptr [%ebp-24], %eax*/
+		
+		//Multiplication
+         }else{
+	         System.out.printf("%s %s, %s\n", op, returned_register, second_register);
+		   	 free_register(second_register);
+		 }
+       }
+     )*
+   )
+   {return returned_register; }
+  
+}
+
+String nterm() : {boolean minus = false;
+				String returned_register;}
+{
+	(	  (<MINUS> {minus = true;})? returned_register = eterm()
+	)
+	{
+	  if(true == minus) {
+		System.out.printf("neg %s\n", returned_register);
+	  }
+	}
+	{return returned_register;}
+}
+
+String eterm() : {String returned_register;
+					String second_register;
+					int exp_count;}
+{
+	(	  returned_register = factor()
+	  (
+	    <EXP> second_register = eterm()
+	    {
+	      exp_count=get_exp_count();
+	      System.out.printf("mov %%eax, %s\n", returned_register);
+	      System.out.printf("exp_start%d:\n",exp_count);
+	      System.out.printf("cmp %s, 1\n", second_register);
+	      System.out.printf("jle exp_end%d\n",exp_count);
+	      System.out.printf("imul %s, %%eax\n", returned_register);
+	      System.out.printf("dec %s\n", second_register);
+	      System.out.printf("jmp exp_start%d\n", exp_count);
+
+	      System.out.printf("exp_end%d:\n",exp_count);
+	      free_register(second_register);
+	      inc_exp_count();
+	    }
+	  )?
+	)
+	{return returned_register;}
+}
+
+String factor() : {Token t;
+				 int stack_offset;
+				 String dest_register="";}
+{
+	(		  t = <INT>
+		{
+		  	dest_register = get_free_register();
+			System.out.printf("mov %s, %s\n",dest_register,t.image);
+		} 
+		| t = <VAR>
+		{
+			stack_offset = get_stack_offset(t.image);
+			dest_register = get_free_register();
+			System.out.printf("mov %s, dword ptr [%%ebp-%d]\n", dest_register, stack_offset);
+		}
+		//Do we need to worry about this case?
+		| <LPAREN> expr() <RPAREN>
+
+	)
+	{return dest_register; }
+}
+
+String addOp() : {String op;}
+{
+	(	  <PLUS> {op="add"; } | <MINUS> { op = "sub";}
+	)
+	{
+	  return op;
+	}
+}
+
+String mulOp() : {String op;}
+{
+	(	  <TIMES> {op="imul"; } | <DIVIDE> {op="idiv"; }
+	)
+	{
+	  return op;
+	}
+}
+
+
+
